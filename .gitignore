@@ -1,0 +1,13 @@
+# Arquivos Excel gerados
+*.xlsx
+.~lock*
+
+# Python
+__pycache__/
+*.pyc
+
+# Ambientes
+.env
+
+# VS Code
+.vscode/
