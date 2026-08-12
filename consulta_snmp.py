@@ -5,7 +5,15 @@ import os
 import re
 
 import pandas as pd
-from pysnmp.hlapi.v3arch.asyncio import *
+from pysnmp.hlapi.v3arch.asyncio import (
+    CommunityData,
+    ContextData,
+    ObjectIdentity,
+    ObjectType,
+    SnmpEngine,
+    UdpTransportTarget,
+    get_cmd,
+)
 
 # ==========================
 # Configurações SNMP
@@ -29,7 +37,22 @@ VERSOES = [
     ("v1", 0),
 ]
 
-OUTPUT_COLUMNS = ["Serial Number", "IP", "Brand", "Model", "Page Count"]
+OUTPUT_COLUMNS = [
+    "Serial Number",
+    "IP",
+    "Brand",
+    "Model",
+    "Page Count",
+    "Status",
+    "SNMP Version",
+    "Failure Reason",
+]
+
+STATUS_OK = "OK"
+STATUS_TIMEOUT = "TIMEOUT"
+STATUS_SNMP_ERROR = "ERRO SNMP"
+STATUS_OID_NOT_SUPPORTED = "OID NÃO SUPORTADO"
+STATUS_UNKNOWN_ERROR = "ERRO DESCONHECIDO"
 
 
 def _format_value(value):
@@ -71,40 +94,73 @@ def _is_valid_ip(ip):
 
 
 async def _snmp_get(ip, oid, mp_model, snmp_engine):
-    """Consulta um único OID usando SNMP v1 ou v2c."""
-    transport = await UdpTransportTarget.create(
-        (ip, 161),
-        timeout=TIMEOUT,
-        retries=RETRIES,
-    )
-
-    error_indication, error_status, error_index, var_binds = await get_cmd(
-        snmp_engine,
-        CommunityData(COMMUNITY, mpModel=mp_model),
-        transport,
-        ContextData(),
-        ObjectType(ObjectIdentity(oid)),
-    )
+    """Consulta um OID e retorna valor ou falha classificada, sem ocultar erros."""
+    try:
+        transport = await UdpTransportTarget.create(
+            (ip, 161),
+            timeout=TIMEOUT,
+            retries=RETRIES,
+        )
+        error_indication, error_status, _, var_binds = await get_cmd(
+            snmp_engine,
+            CommunityData(COMMUNITY, mpModel=mp_model),
+            transport,
+            ContextData(),
+            ObjectType(ObjectIdentity(oid)),
+        )
+    except (OSError, ValueError) as exc:
+        return _failure_result(STATUS_UNKNOWN_ERROR, f"Falha de transporte: {exc}")
+    except Exception as exc:
+        return _failure_result(STATUS_UNKNOWN_ERROR, f"{type(exc).__name__}: {exc}")
 
     if error_indication:
-        return False, str(error_indication)
+        status, reason = _classify_snmp_error(str(error_indication))
+        return _failure_result(status, reason)
 
     if error_status:
-        return False, str(error_status)
+        status, reason = _classify_snmp_error(str(error_status))
+        return _failure_result(status, reason)
 
-    if var_binds:
-        return True, _format_value(var_binds[0][1])
+    if not var_binds:
+        return _failure_result(STATUS_SNMP_ERROR, "Resposta SNMP sem valores")
 
-    return False, "Sem resposta"
+    value = var_binds[0][1]
+    value_text = _format_value(value)
+    if _is_unsupported_oid_value(value_text):
+        return _failure_result(STATUS_OID_NOT_SUPPORTED, value_text)
+
+    return {"ok": True, "value": value_text, "status": STATUS_OK, "reason": None}
 
 
-async def _consultar_oid(ip, oid, snmp_engine):
-    """Tenta consultar um OID primeiro em v2c e depois em v1."""
-    for _, mp_model in VERSOES:
-        ok, resultado = await _snmp_get(ip, oid, mp_model, snmp_engine)
-        if ok:
-            return resultado
-    return "Erro"
+def _failure_result(status, reason):
+    return {"ok": False, "value": None, "status": status, "reason": reason}
+
+
+def _classify_snmp_error(message):
+    """Classifica mensagens do pysnmp em status que serão gravados na planilha."""
+    normalized = message.strip().lower()
+    if "timeout" in normalized or "no snmp response received" in normalized:
+        return STATUS_TIMEOUT, message
+    if _is_unsupported_oid_value(normalized):
+        return STATUS_OID_NOT_SUPPORTED, message
+    return STATUS_SNMP_ERROR, message
+
+
+def _is_unsupported_oid_value(value):
+    normalized = str(value).strip().lower()
+    markers = ("nosuchobject", "no such object", "nosuchinstance", "no such instance", "nosuchname", "no such name")
+    return any(marker in normalized for marker in markers)
+
+
+async def _select_snmp_version(ip, snmp_engine):
+    """Testa o contador em v2c e v1, preservando o resultado da tentativa válida."""
+    last_result = _failure_result(STATUS_SNMP_ERROR, "Nenhuma versão SNMP respondeu")
+    for version, mp_model in VERSOES:
+        result = await _snmp_get(ip, OID_COUNTER, mp_model, snmp_engine)
+        if result["ok"] or result["status"] == STATUS_OID_NOT_SUPPORTED:
+            return version, mp_model, result
+        last_result = result
+    return None, None, last_result
 
 
 KNOWN_BRANDS = [
@@ -297,31 +353,94 @@ def _clean_model(modelo, marca, sysdescr):
 
 
 async def _consultar_impressora_async(ip, snmp_engine, semaforo):
-    """Executa consultas SNMP em paralelo para um único IP."""
+    """Consulta uma impressora sem deixar uma falha individual interromper o lote."""
+    try:
+        return await _consultar_impressora_interno(ip, snmp_engine, semaforo)
+    except Exception as exc:
+        return _printer_failure(
+            _failure_result(STATUS_UNKNOWN_ERROR, f"{type(exc).__name__}: {exc}")
+        )
+
+
+async def _consultar_impressora_interno(ip, snmp_engine, semaforo):
+    """Executa a consulta protegida pelo limite de concorrência."""
     async with semaforo:
-        tarefas = [
-            asyncio.create_task(_consultar_oid(ip, OID_SERIAL, snmp_engine)),
-            asyncio.create_task(_consultar_oid(ip, OID_BRAND, snmp_engine)),
-            asyncio.create_task(_consultar_oid(ip, OID_MODEL, snmp_engine)),
-            asyncio.create_task(_consultar_oid(ip, OID_COUNTER, snmp_engine)),
-        ]
+        version, mp_model, counter_result = await _select_snmp_version(ip, snmp_engine)
+        if version is None:
+            return _printer_failure(counter_result)
 
-        serial, brand_raw, model_raw, contador = await asyncio.gather(*tarefas)
+        # Depois de identificar a versão, consulta os outros OIDs apenas uma vez.
+        serial_result, brand_result, model_result = await asyncio.gather(
+            _snmp_get(ip, OID_SERIAL, mp_model, snmp_engine),
+            _snmp_get(ip, OID_BRAND, mp_model, snmp_engine),
+            _snmp_get(ip, OID_MODEL, mp_model, snmp_engine),
+        )
 
-        # Extrai apenas o primeiro nome do brand (a marca)
-        brand = _extract_brand(brand_raw)
+        model_value = model_result["value"]
+        model_reason = model_result["reason"]
+        model_status = model_result["status"]
+        if model_value is None and model_result["status"] == STATUS_OID_NOT_SUPPORTED:
+            alt_model_result = await _snmp_get(ip, OID_ALT_MODEL, mp_model, snmp_engine)
+            if alt_model_result["ok"]:
+                model_value = alt_model_result["value"]
+                model_reason = None
+                model_status = STATUS_OK
+            else:
+                model_reason = alt_model_result["reason"]
+                model_status = alt_model_result["status"]
 
-        # Se o modelo padrão está vazio, usa o alternativo
-        modelo = model_raw
-        if not modelo:
-            modelo = await _consultar_oid(ip, OID_ALT_MODEL, snmp_engine)
+        brand_raw = brand_result["value"]
+        brand = _extract_brand(brand_raw) if brand_raw is not None else None
+        if brand_raw is not None and model_value is not None:
+            _, parsed_model = _parse_brand_model(brand_raw)
+            if parsed_model and _is_printer_model(parsed_model, brand):
+                model_value = _clean_model(parsed_model, brand, brand_raw)
+
+        failure_reason = None
+        status = STATUS_OK
+        if not counter_result["ok"]:
+            status = counter_result["status"]
+            failure_reason = counter_result["reason"]
+        else:
+            field_failures = [
+                result
+                for result in (serial_result, brand_result)
+                if not result["ok"]
+            ]
+            if model_value is None:
+                field_failures.append({"status": model_status, "reason": model_reason})
+            if field_failures:
+                status = field_failures[0]["status"]
+                failure_reason = "; ".join(
+                    result["reason"] for result in field_failures if result["reason"]
+                ) or None
 
         return {
-            "Serial Number": serial,
+            "Serial Number": serial_result["value"],
             "Brand": brand,
-            "Model": modelo,
-            "Page Count": contador,
+            "Model": model_value,
+            "Page Count": counter_result["value"],
+            "Status": status,
+            "SNMP Version": version,
+            "Failure Reason": failure_reason,
         }
+
+
+def _printer_failure(result):
+    return {
+        "Serial Number": None,
+        "Brand": None,
+        "Model": None,
+        "Page Count": None,
+        "Status": result["status"],
+        "SNMP Version": None,
+        "Failure Reason": result["reason"],
+    }
+
+
+def _to_spreadsheet_value(value, error_value=""):
+    """Converte None em texto somente no momento de gerar a planilha."""
+    return error_value if value is None else value
 
 
 async def _processar_planilha_async(caminho_arquivo, logger=print, progress_callback=None):
@@ -338,42 +457,55 @@ async def _processar_planilha_async(caminho_arquivo, logger=print, progress_call
 
     snmp_engine = SnmpEngine()
     semaforo = asyncio.Semaphore(CONCORRENCIA)
+    try:
+        for linha, ip in enumerate(df["IP"], start=1):
+            ip_str = str(ip).strip()
 
-    for linha, ip in enumerate(df["IP"], start=1):
-        ip_str = str(ip).strip()
+            if not _is_valid_ip(ip_str):
+                logger(f"[{linha}] IP inválido ou ausente: {ip}")
+                resultados.append({
+                    "Serial Number": None,
+                    "IP": ip_str,
+                    "Brand": None,
+                    "Model": None,
+                    "Page Count": None,
+                    "Status": STATUS_UNKNOWN_ERROR,
+                    "SNMP Version": None,
+                    "Failure Reason": "IP inválido ou ausente",
+                })
+                continue
 
-        if not _is_valid_ip(ip_str):
-            logger(f"[{linha}] IP inválido ou ausente: {ip}")
-            resultados.append({
-                "Serial Number": "Erro",
-                "IP": ip_str,
-                "Brand": "Erro",
-                "Model": "Erro",
-                "Page Count": "Erro",
-            })
-            continue
+            logger(f"[{linha}] Agendando consulta para IP: {ip_str}")
+            tarefas.append((linha, ip_str, asyncio.create_task(_consultar_impressora_async(ip_str, snmp_engine, semaforo))))
 
-        logger(f"[{linha}] Agendando consulta para IP: {ip_str}")
-        tarefas.append((linha, ip_str, asyncio.create_task(_consultar_impressora_async(ip_str, snmp_engine, semaforo))))
-
-    total = len(tarefas)
-    if progress_callback is not None:
-        progress_callback(0, total)
-
-    concluido = 0
-    for linha, ip_str, tarefa in tarefas:
-        dados = await tarefa
-        dados["IP"] = ip_str
-        resultados.append(dados)
-        concluido += 1
-
+        total = len(tarefas)
         if progress_callback is not None:
-            progress_callback(concluido, total)
+            progress_callback(0, total)
 
-        logger(
-            f"[{linha}] Serial Number: {dados['Serial Number']} | Brand: {dados['Brand']} | "
-            f"Model: {dados['Model']} | Page Count: {dados['Page Count']}"
-        )
+        concluido = 0
+        for linha, ip_str, tarefa in tarefas:
+            dados = await tarefa
+            dados["IP"] = ip_str
+            resultados.append(dados)
+            concluido += 1
+
+            if progress_callback is not None:
+                progress_callback(concluido, total)
+
+            logger(
+                f"[{linha}] Status: {dados['Status']} | SNMP: {dados['SNMP Version'] or '-'} | "
+                f"Serial Number: {dados['Serial Number']} | Brand: {dados['Brand']} | "
+                f"Model: {dados['Model']} | Page Count: {dados['Page Count']}"
+            )
+    finally:
+        dispatcher = getattr(snmp_engine, "transport_dispatcher", None)
+        close_dispatcher = getattr(dispatcher, "close_dispatcher", None)
+        if callable(close_dispatcher):
+            close_dispatcher()
+
+    for resultado in resultados:
+        for field in ("Serial Number", "Brand", "Model", "Page Count", "SNMP Version", "Failure Reason"):
+            resultado[field] = _to_spreadsheet_value(resultado[field])
 
     df_saida = pd.DataFrame(resultados, columns=OUTPUT_COLUMNS)
     pasta_saida = os.path.dirname(caminho_arquivo)

@@ -9,7 +9,7 @@ Com uma única execução, o programa coleta **número de série**, **marca**, *
 - Interface gráfica simples: selecione a planilha e acompanhe o progresso em tempo real.
 - Leitura de planilhas `.xlsx` e `.xls` com uma coluna chamada `IP`.
 - Consultas SNMP v2c com tentativa automática de fallback para SNMP v1.
-- Coleta de número de série, marca, modelo e total de páginas impressas.
+- Coleta de número de série, marca, modelo e total de páginas impressas, com status e motivo de falha por IP.
 - Processamento concorrente para acelerar consultas em lote.
 - Planilha de saída organizada e salva ao lado do arquivo de origem.
 
@@ -57,11 +57,11 @@ impressoras_com_consulta_snmp.xlsx
 
 ## Estrutura da planilha gerada
 
-| Serial Number | IP | Brand | Model | Page Count |
-| --- | --- | --- | --- | --- |
-| E12345A | 192.168.1.10 | Brother | MFC-L6902DW | 12450 |
+| Serial Number | IP | Brand | Model | Page Count | Status | SNMP Version | Failure Reason |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| E12345A | 192.168.1.10 | Brother | MFC-L6902DW | 12450 | OK | v2c | |
 
-Quando uma consulta não puder ser concluída, o respectivo campo será preenchido com `Erro`. IPs ausentes ou inválidos também são registrados na planilha de saída.
+Quando uma consulta falhar, a planilha registra o `Status`, a versão SNMP utilizada quando identificada e o motivo técnico em `Failure Reason`. Os status possíveis incluem `TIMEOUT`, `ERRO SNMP`, `OID NÃO SUPORTADO` e `ERRO DESCONHECIDO`.
 
 ## Configuração SNMP
 
