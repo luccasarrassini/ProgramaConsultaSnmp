@@ -2,12 +2,7 @@ from pysnmp.hlapi.v3arch.asyncio import *
 import asyncio
 
 IPS = [
-    "10.5.0.164",
-    "10.5.0.191",
-    "10.5.0.207",
-    "10.5.0.214",
-    "10.5.0.215",
-    "10.5.0.56"
+    "192.168.1.97"
 ]
 
 COMMUNITY = "public"

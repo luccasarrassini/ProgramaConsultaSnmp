@@ -6,6 +6,12 @@
 __pycache__/
 *.pyc
 
+# Artefatos de compilação e logs
+build/
+dist/
+dist2/
+*.log
+
 # Ambientes
 .env
 

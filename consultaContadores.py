@@ -12,6 +12,7 @@ from tkinter import Tk, filedialog
 
 COMMUNITY = "public"
 OID = "1.3.6.1.2.1.43.10.2.1.4.1.1"
+OID_MODELO = "1.3.6.1.2.1.25.3.2.1.3.1"
 
 TIMEOUT = 3
 RETRIES = 1
@@ -53,7 +54,7 @@ async def consultar_contador(ip):
         ip = str(ip).strip()
 
         if not ip:
-            return "IP Vazio"
+            return {"contador": "IP Vazio", "modelo": ""}
 
         print(f"Consultando {ip}...")
 
@@ -61,6 +62,9 @@ async def consultar_contador(ip):
             ("v2c", 1),
             ("v1", 0)
         ]
+
+        contador = None
+        modelo = None
 
         for nome_versao, mp_model in versoes:
 
@@ -72,38 +76,55 @@ async def consultar_contador(ip):
                     retries=RETRIES
                 )
 
-                errorIndication, errorStatus, errorIndex, varBinds = await get_cmd(
-                    snmp_engine,
-                    CommunityData(COMMUNITY, mpModel=mp_model),
-                    transport,
-                    ContextData(),
-                    ObjectType(ObjectIdentity(OID))
-                )
-
-                if errorIndication:
-                    continue
-
-                if errorStatus:
-                    continue
-
-                if varBinds:
-
-                    contador = int(varBinds[0][1])
-
-                    print(
-                        f"  ✓ {ip} | "
-                        f"{contador} páginas | "
-                        f"{nome_versao}"
+                # Consulta contador
+                if not contador:
+                    errorIndication, errorStatus, errorIndex, varBinds = await get_cmd(
+                        snmp_engine,
+                        CommunityData(COMMUNITY, mpModel=mp_model),
+                        transport,
+                        ContextData(),
+                        ObjectType(ObjectIdentity(OID))
                     )
 
-                    return contador
+                    if not errorIndication and not errorStatus and varBinds:
+                        try:
+                            contador = int(varBinds[0][1])
+                        except:
+                            pass
+
+                # Consulta modelo
+                if not modelo:
+                    errorIndication, errorStatus, errorIndex, varBinds = await get_cmd(
+                        snmp_engine,
+                        CommunityData(COMMUNITY, mpModel=mp_model),
+                        transport,
+                        ContextData(),
+                        ObjectType(ObjectIdentity(OID_MODELO))
+                    )
+
+                    if not errorIndication and not errorStatus and varBinds:
+                        modelo = str(varBinds[0][1]).strip()
+
+                # Se conseguiu ambos, sai do loop
+                if contador and modelo:
+                    break
 
             except Exception:
                 pass
 
-        print(f"  ✗ {ip} sem resposta")
+        # Fallback para valores não encontrados
+        if not contador:
+            contador = "Erro"
+        if not modelo:
+            modelo = "Erro"
 
-        return "Erro"
+        print(
+            f"  ✓ {ip} | "
+            f"{contador} páginas | "
+            f"Modelo: {modelo}"
+        )
+
+        return {"contador": contador, "modelo": modelo}
 
 # ==========================
 # PROCESSAMENTO
@@ -126,7 +147,8 @@ async def main():
 
     resultados = await asyncio.gather(*tarefas)
 
-    df["Contador"] = resultados
+    df["Contador"] = [r["contador"] for r in resultados]
+    df["Modelo"] = [r["modelo"] for r in resultados]
 
     arquivo_saida = os.path.join(
         os.path.dirname(ARQUIVO),
