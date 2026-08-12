@@ -1,88 +1,112 @@
 # Consulta SNMP de Impressoras
 
-Script simples para consultar o contador de páginas de impressoras via SNMP a partir de uma planilha Excel.
+Uma ferramenta desktop para consultar impressoras em rede por SNMP e transformar uma planilha de IPs em um inventário pronto para uso.
 
-Arquivos principais
+Com uma única execução, o programa coleta **número de série**, **marca**, **modelo** e **contador de páginas** de várias impressoras em paralelo.
 
-- `consultaContadores.py` — lê uma planilha com IPs e grava o contador em uma nova planilha.
-- `teste_snmp.py` — script de diagnóstico para testar respostas SNMP por IP.
+## O que ela entrega
 
-Requisitos
+- Interface gráfica simples: selecione a planilha e acompanhe o progresso em tempo real.
+- Leitura de planilhas `.xlsx` e `.xls` com uma coluna chamada `IP`.
+- Consultas SNMP v2c com tentativa automática de fallback para SNMP v1.
+- Coleta de número de série, marca, modelo e total de páginas impressas.
+- Processamento concorrente para acelerar consultas em lote.
+- Planilha de saída organizada e salva ao lado do arquivo de origem.
 
-- Python 3.8+
-- Bibliotecas Python:
-  - `pysnmp`
-  - `pandas`
-  - `openpyxl` (para leitura/escrita do Excel)
-  - `tkinter` (para diálogo de seleção de arquivo; já incluso na maioria das instalações do Python no Windows)
+## Como usar
 
-Instalação rápida
+### 1. Instale os requisitos
 
-Abra um terminal e rode:
-
-```bash
-python -m pip install pysnmp pandas openpyxl
-```
-
-Uso
-
-1. `consultaContadores.py`
-
-- Execute o script e selecione a planilha quando o diálogo for exibido. O script espera que a planilha tenha uma coluna chamada `IP` com os endereços.
+É necessário ter o Python 3.8 ou superior instalado.
 
 ```bash
-python consultaContadores.py
+python -m pip install pandas openpyxl pysnmp
 ```
 
-- Saída: `impressoras_com_contador.xlsx` no mesmo diretório da planilha origem.
+No Linux, instale também o suporte ao Tkinter:
 
-2. `teste_snmp.py`
+```bash
+sudo apt install python3-tk
+```
 
-- Use este script para diagnosticar IPs problemáticos (mostra indicações de erro, status e valores retornados).
+### 2. Prepare a planilha
+
+Crie uma planilha Excel com uma coluna chamada `IP`:
+
+| IP |
+| --- |
+| 192.168.1.10 |
+| 192.168.1.11 |
+
+### 3. Abra o programa
+
+```bash
+python ui.py
+```
+
+1. Clique em **Selecionar arquivo**.
+2. Escolha a planilha com os IPs.
+3. Clique em **Iniciar consulta**.
+4. Ao final, abra a planilha gerada na mesma pasta do arquivo original.
+
+Se a entrada for `impressoras.xlsx`, a saída será:
+
+```text
+impressoras_com_consulta_snmp.xlsx
+```
+
+## Estrutura da planilha gerada
+
+| Serial Number | IP | Brand | Model | Page Count |
+| --- | --- | --- | --- | --- |
+| E12345A | 192.168.1.10 | Brother | MFC-L6902DW | 12450 |
+
+Quando uma consulta não puder ser concluída, o respectivo campo será preenchido com `Erro`. IPs ausentes ou inválidos também são registrados na planilha de saída.
+
+## Configuração SNMP
+
+As configurações principais ficam em [consulta_snmp.py](consulta_snmp.py):
+
+```python
+COMMUNITY = "public"
+TIMEOUT = 3
+RETRIES = 1
+CONCORRENCIA = 10
+```
+
+Altere `COMMUNITY` caso sua rede utilize outra comunidade SNMP. O serviço SNMP da impressora deve estar habilitado e acessível pela porta UDP 161.
+
+## Diagnóstico de uma impressora
+
+Use `teste_snmp.py` para testar um ou mais IPs manualmente. Edite a lista `IPS` no arquivo e execute:
 
 ```bash
 python teste_snmp.py
 ```
 
-Formato esperado da planilha Excel
+O script mostra o resultado para SNMP v1 e v2c, consultando o contador e as informações básicas do equipamento.
 
-- Planilha (XLSX/XLS) com uma coluna chamada `IP` (sem outras formatações obrigatórias). Exemplo:
+## Gerar um executável (Windows)
 
-| IP |
-|-----|
-| 10.5.0.164 |
-| 10.5.0.191 |
+O arquivo `consulta_snmp.spec` está preparado para o PyInstaller.
 
-Configurações importantes (em `consultaContadores.py`)
-
-- `COMMUNITY` — comunidade SNMP (padrão: `public`).
-- `OID` — OID consultado para o contador de páginas (padrão: `1.3.6.1.2.1.43.10.2.1.4.1.1`).
-- `TIMEOUT` — tempo de espera por requisição (segundos). Ajuste se impressoras respondem devagar.
-- `RETRIES` — número de tentativas adicionais por requisição.
-- `CONCORRENCIA` — quantidade máxima de requisições simultâneas (limita uso de rede/CPU).
-
-Dicas de diagnóstico e resolução de problemas
-
-- Se algumas impressoras estão acessíveis na rede mas retornam erro:
-  - Verifique se usam SNMPv1 em vez de SNMPv2c. O script já tenta `v2c` e `v1` nesta ordem.
-  - Aumente `TIMEOUT` (ex.: 5–10s) e `RETRIES`.
-  - Teste um único IP com `teste_snmp.py` para ver mensagens mais detalhadas.
-  - Verifique regras de firewall ou ACL que possam limitar o tráfego SNMP (UDP/161).
-  - Confirme a comunidade SNMP (pode não ser `public`).
-
-Execução em ambientes sem GUI
-
-- Os scripts atuais abrem um diálogo de arquivo com `tkinter`. Em servidores/headless, edite `consultaContadores.py` e atribua o caminho do arquivo diretamente à variável `ARQUIVO` para evitar o diálogo.
-
-Exemplo:
-
-```python
-ARQUIVO = r"C:\caminho\para\planilha.xlsx"
+```bash
+python -m pip install pyinstaller
+pyinstaller consulta_snmp.spec
 ```
 
-Observações finais
+O executável será gerado em `dist/consulta_snmp/`.
 
-- `consultaContadores.py` foi implementado com um `Semaphore` para limitar a concorrência e reutiliza uma instância de `SnmpEngine` para melhor desempenho.
-- Se quiser, posso gerar também um `requirements.txt`, um exemplo de planilha ou um `README` mais detalhado com exemplos de troubleshooting e comandos para coletar pacotes de rede (tcpdump/wireshark).
+## Principais arquivos
 
-Se quiser que eu adicione algum detalhe extra (ex.: `requirements.txt`, exemplo de planilha ou instruções para execução em Linux), diga qual opção prefere.
+| Arquivo | Função |
+| --- | --- |
+| `ui.py` | Interface gráfica em Tkinter. |
+| `consulta_snmp.py` | Lógica de leitura, consultas SNMP e criação da planilha de saída. |
+| `teste_snmp.py` | Diagnóstico SNMP para IPs específicos. |
+| `consulta_snmp.spec` | Configuração de empacotamento com PyInstaller. |
+| `consultaContadores.py` | Versão de linha de comando para contador e modelo. |
+
+---
+
+Desenvolvido por **Lucca Sarrassini**.
